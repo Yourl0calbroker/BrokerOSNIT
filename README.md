@@ -1,6 +1,6 @@
 Installation:
 
-git clone https://github.com/Yourl0calbroker/BrokerOSNIT-Instagram-.git
+git clone https://github.com/Yourl0calbroker/BrokerOSNIT.git
 
 Usage:
 
@@ -12,7 +12,7 @@ Enter Username And Password To Retrieve Your Session ID
 
 Run with command 
 
-cd BrokerOSNIT-Instagram-
+cd BrokerOSNIT
 
-python3 ./BrokerOSNIT-Instagram-.py
+python3 ./BrokerOSNIT.py
 
