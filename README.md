@@ -16,3 +16,8 @@ cd BrokerOSNIT
 
 python3 ./BrokerOSNIT.py
 
+
+Updating: 
+
+cd BrokerOSNIT && git pull origin main
+
