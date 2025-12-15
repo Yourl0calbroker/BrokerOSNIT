@@ -1,86 +1,121 @@
-# Define colors and formatting codes
-CYAN = '\033[96m'
-GREEN = '\033[92m'
-RED = '\033[91m'
-YELLOW = '\033[93m'
-LIGHT_YELLOW_EX = '\033[93m'
-LIGHT_BLUE_EX = '\033[94m'
-ITALIC = '\033[3m'
-ITALIC_OFF = '\033[23m'
-
-def colorPrint(*args):
-    output = ''.join(args)
-    print(output + '\033[0m') 
-
+#!/usr/bin/env python3
 import requests
 from datetime import datetime
 from requests.exceptions import RequestException
 import os
 import time
 import threading 
+import sys # Import sys for clean exit
+
+# --- Color and Formatting Definitions ---
+class Color:
+    """Class to hold ANSI color and formatting codes."""
+    CYAN = '\033[96m'
+    GREEN = '\033[92m'
+    RED = '\033[91m'
+    YELLOW = '\033[93m'
+    BLUE = '\033[94m' # Renamed LIGHT_BLUE_EX for simplicity
+    ITALIC = '\033[3m'
+    ITALIC_OFF = '\033[23m'
+    RESET = '\033[0m' # Important: Explicit reset code
+
+def colorPrint(*args):
+    """Prints colored output using the defined Color class codes."""
+    # Ensure all arguments are treated as strings
+    output = ''.join(str(arg) for arg in args)
+    # The RESET code is automatically added to the end for a clean line break
+    print(output + Color.RESET) 
+
+# --- Global State and Utility Functions ---
+_is_video = None
+_media_url = None
+_file_name = None
+_stop_animation = False 
 
 def get_time_str():
+    """Returns the current time formatted as HH:MM:SS."""
     return datetime.now().strftime("%H:%M:%S")
 
-is_video = None
-media_url = None
-file_name = None
-stop_animation = False 
-
 def animated_loading_bar(duration_seconds=15, message="Your_l0cal_broker"):
-    
-    global stop_animation
+    """Displays a simple animated loading bar in a separate thread."""
+    global _stop_animation
     
     bar_length = 30
     steps = 100
-    interval = duration_seconds / steps
+    # Set a minimum interval to prevent excessive CPU usage
+    interval = max(0.01, duration_seconds / steps) 
 
-    print_style = "\r\033[92m" 
+    # Use GREEN color for the bar
+    print_style = f"\r{Color.GREEN}" 
     
     for i in range(steps + 1):
-        if stop_animation:
+        if _stop_animation:
+            # Clear the current line before breaking
+            sys.stdout.write("\r" + " " * (bar_length + 20) + "\r")
+            sys.stdout.flush()
             break
             
         progress = i / steps
         filled_length = int(bar_length * progress)
         bar = '█' * filled_length + '-' * (bar_length - filled_length)
         
-        print(f"{print_style}[{bar}] {int(progress * 100)}% {message}\033[0m", end='', flush=True)
+        sys.stdout.write(f"{print_style}[{bar}] {int(progress * 100)}% {message}{Color.RESET}")
+        sys.stdout.flush()
         time.sleep(interval)
-
-    print("\r" + " " * (bar_length + 20) + "\r", end='', flush=True)
+    
+    # Final clear if the loop finishes without the stop signal
+    if not _stop_animation:
+        sys.stdout.write("\r" + " " * (bar_length + 20) + "\r")
+        sys.stdout.flush()
     
 
 def fetch_data(username):
-    global stop_animation
+    """Initiates the fetching of profile information and posts."""
+    global _stop_animation
     current_time = get_time_str()
     colorPrint(
-        CYAN, f"[{current_time}] \t",
-        GREEN, "[INFO] \t\t\b", 
-        LIGHT_YELLOW_EX, "Fetching profile info and posts..."
+        Color.CYAN, f"[{current_time}] \t",
+        Color.GREEN, "[INFO] \t\t\b", 
+        Color.YELLOW, "Fetching profile info and posts..."
     )
     
     response = None
     
-    loading_thread = threading.Thread(target=animated_loading_bar, args=(30, "Your_l0cal_broker")) 
+    # Start loading animation
+    _stop_animation = False
+    loading_thread = threading.Thread(
+        target=animated_loading_bar, 
+        args=(30, "Your_l0cal_broker"),
+        daemon=True # Make it a daemon thread so it exits if the main program crashes
+    ) 
     loading_thread.start()
     
     try:
         url = f"https://www.instagram.com/api/v1/users/web_profile_info/?username={username}"
         headers = {
             "X-IG-App-ID": "936619743392459",
+            # Adding a basic User-Agent to mimic a real browser request
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
         }
         response = requests.get(url, headers=headers, timeout=15)
         
-        stop_animation = True
-        loading_thread.join() 
+        # Stop animation upon receiving response
+        _stop_animation = True
+        loading_thread.join(timeout=1) # Wait briefly for the thread to clean up
 
         if response.status_code != 200:
             error_handler(response)
             return 
 
-        user_data = response.json()["data"]["user"]
-        
+        user_data = response.json().get("data", {}).get("user")
+        if not user_data:
+            colorPrint(
+                Color.CYAN, f"[{get_time_str()}] \t",
+                Color.RED, "[API ERROR] \t",
+                Color.RED, "Could not find 'user' data in API response."
+            )
+            return
+
         account_type(user_data)
         posts_found = get_posts(user_data)
         
@@ -88,76 +123,78 @@ def fetch_data(username):
             ask_to_download()
         
     except RequestException as e:
-        stop_animation = True
-        loading_thread.join()
+        _stop_animation = True
+        loading_thread.join(timeout=1)
         colorPrint(
-            CYAN, f"[{get_time_str()}] \t",
-            RED, "[REQUEST] \t\b",
-            YELLOW, "[WARNING] \t",
-            RED, f"Network or connection error: {e}"
+            Color.CYAN, f"[{get_time_str()}] \t",
+            Color.RED, "[REQUEST] \t\b",
+            Color.YELLOW, "[WARNING] \t",
+            Color.RED, f"Network or connection error: {e}"
         )
     except Exception as e:
-        stop_animation = True
-        loading_thread.join()
+        _stop_animation = True
+        loading_thread.join(timeout=1)
         status_code = response.status_code if response is not None else "N/A"
         colorPrint(
-            CYAN, f"[{get_time_str()}] \t",
-            RED, f"[{status_code}] \t\t\b",
-            YELLOW, "[WARNING] \t",
-            RED, f"Failed to fetch account data: {e}"
+            Color.CYAN, f"[{get_time_str()}] \t",
+            Color.RED, f"[{status_code}] \t\t\b",
+            Color.YELLOW, "[WARNING] \t",
+            Color.RED, f"Failed to fetch account data: {type(e).__name__}: {e}"
         )
 
 
 def error_handler(response):
+    """Handles and prints API response errors."""
     current_time = get_time_str()
-    if response.status_code == 404:
-        colorPrint(
-            CYAN, f"[{current_time}] \t",
-            RED, "[404] \t\t\b",
-            RED, "[ERROR] \t\t",
-            RED, "User not found"
-        )
-    elif response.status_code == 401:
-        colorPrint(
-            CYAN, f"[{current_time}] \t",
-            RED, "[401] \t\t\b",
-            YELLOW, "[WARNING] \t",
-            RED, "Instagram added rate limit to your IP. Try again later"
-        )
+    status_code = response.status_code
+    
+    if status_code == 404:
+        msg = "User not found"
+    elif status_code == 401:
+        msg = "Instagram added rate limit to your IP. Try again later"
     else:
-        colorPrint(
-            CYAN, f"[{current_time}] \t",
-            RED, f"[{response.status_code}] \t\t\b",
-            RED, "[ERROR] \t\t",
-            RED, "Something went wrong"
-        )
+        msg = "Something went wrong"
+
+    # Try to parse JSON for a more specific error message if available
+    try:
+        data = response.json()
+        if 'message' in data:
+            msg = f"{data['message']} ({msg})"
+    except requests.JSONDecodeError:
+        pass # Ignore if it's not JSON
+    
+    colorPrint(
+        Color.CYAN, f"[{current_time}] \t",
+        Color.RED, f"[{status_code}] \t\t\b",
+        Color.RED, "[ERROR] \t\t",
+        Color.RED, msg
+    )
 
 
 def account_type(user_data):
+    """Prints whether the profile is public or private."""
     current_time = get_time_str()
-    if user_data.get("is_private"):
-        colorPrint(
-            CYAN, f"[{current_time}] \t",
-            GREEN, "[TYPE]  \t\b",
-            RED, "Private profile\n"
-        )
-    else:
-        colorPrint(
-            CYAN, f"[{current_time}] \t",
-            GREEN, "[TYPE]  \t\b",
-            RED, "Public profile\n"
-        )
+    is_private = user_data.get("is_private")
+    type_color = Color.RED if is_private else Color.GREEN
+    type_msg = "Private profile" if is_private else "Public profile"
+    
+    colorPrint(
+        Color.CYAN, f"[{current_time}] \t",
+        Color.GREEN, "[TYPE]  \t\b",
+        type_color, f"{type_msg}\n"
+    )
 
 
 def get_posts(user_data):
+    """Parses and prints a summary of the user's latest posts."""
     current_time = get_time_str()
-    edges = user_data["edge_owner_to_timeline_media"]["edges"]
+    edges = user_data.get("edge_owner_to_timeline_media", {}).get("edges", [])
 
     if not edges:
         colorPrint(
-            CYAN, f"[{current_time}] \t",
-            GREEN, "[POST]  \t\b",
-            RED, "No posts found"
+            Color.CYAN, f"[{current_time}] \t",
+            Color.GREEN, "[POST]  \t\b",
+            Color.RED, "No posts found in the visible feed."
         )
         return False
     else:
@@ -169,40 +206,37 @@ def get_posts(user_data):
 
             post_url = f"https://www.instagram.com/p/{post_shortcode}/"
             
-            colorPrint(YELLOW, f"+--------------------------------------------------------[{i}]-------------------------------------------------------+\n")
+            # Use a print/sys.stdout.write for the separator to avoid colorPrint's automatic reset
+            print(f"{Color.YELLOW}+--------------------------------------------------------[{i}]-------------------------------------------------------+{Color.RESET}\n", end='')
 
-            if is_video_flag:
-                colorPrint(
-                    CYAN, f"[{current_time}] \t",
-                    GREEN, "[VIDEO]  \t\b",
-                    LIGHT_BLUE_EX, post_url
-                )
-            else:
-                colorPrint(
-                    CYAN, f"[{current_time}] \t",
-                    GREEN, "[IMAGE]  \t\b",
-                    LIGHT_BLUE_EX, post_url
-                )
+            media_type_msg = "[VIDEO]" if is_video_flag else "[IMAGE]"
+            
+            colorPrint(
+                Color.CYAN, f"[{current_time}] \t",
+                Color.GREEN, f"{media_type_msg} \t\b",
+                Color.BLUE, post_url
+            )
 
             colorPrint(
-                CYAN, f"[{current_time}] \t",
-                GREEN, "[OWNER] \t\b",
-                LIGHT_BLUE_EX, f"https://www.instagram.com/{post_owner}"
+                Color.CYAN, f"[{current_time}] \t",
+                Color.GREEN, "[OWNER] \t\b",
+                Color.BLUE, f"https://www.instagram.com/{post_owner}"
             )
 
             tagged_edges = post_data.get("edge_media_to_tagged_user", {}).get("edges", [])
             for collaborator_item in tagged_edges:
                 collaborator_username = collaborator_item["node"]["user"]["username"]
                 colorPrint(
-                    CYAN, f"[{current_time}] \t",
-                    GREEN, "[COLLAB] \t\b",
-                    LIGHT_BLUE_EX, f"https://www.instagram.com/{collaborator_username}"
+                    Color.CYAN, f"[{current_time}] \t",
+                    Color.GREEN, "[COLLAB] \t\b",
+                    Color.BLUE, f"https://www.instagram.com/{collaborator_username}"
                 )
             
             print()
         return True
 
 def ask_to_download():
+    """Prompts the user to download a listed post."""
     print()
     download_choice = input(
         f"[{get_time_str()}] \t [PROMPT] \t Would you like to download any of the posts listed? (y/n): "
@@ -215,40 +249,57 @@ def ask_to_download():
         download_media(post_url)
     else:
         colorPrint(
-            CYAN, f"[{get_time_str()}] \t",
-            GREEN, "[INFO] \t\t", 
-            LIGHT_YELLOW_EX, "Download skipped. Exiting."
+            Color.CYAN, f"[{get_time_str()}] \t",
+            Color.GREEN, "[INFO] \t\t", 
+            Color.YELLOW, "Download skipped. Exiting."
         )
 
 def fetch_media_details(url):
-    global is_video, media_url, file_name
+    """Extracts the direct media URL and filename from a post URL."""
+    global _is_video, _media_url, _file_name
     
-    is_video, media_url, file_name = None, None, None
+    _is_video, _media_url, _file_name = None, None, None
 
-    parts = url.strip('/').split("/")
+    # Basic URL validation and parsing
+    url = url.strip().strip('/')
+    parts = url.split("/")
     
-    if len(parts) < 6 or parts[4] not in ("p", "reel"):
+    if len(parts) < 6 or parts[2] != "www.instagram.com":
         colorPrint(
-            CYAN, f"[{get_time_str()}] \t",
-            RED, "[ERROR] \t",
-            RED, "Invalid URL format. Check if the URL is complete."
+            Color.CYAN, f"[{get_time_str()}] \t",
+            Color.RED, "[ERROR] \t",
+            Color.RED, "Invalid URL format. Check if the URL is complete."
         )
         return False
+    
+    # Parts: [0]https:, [1], [2]www.instagram.com, [3]username, [4]p/reel, [5]shortcode
+    try:
+        user_name = parts[3]
+        media_type = parts[4] # 'p' or 'reel'
+        shortcode = parts[5]
+    except IndexError:
+        colorPrint(
+            Color.CYAN, f"[{get_time_str()}] \t",
+            Color.RED, "[ERROR] \t",
+            Color.RED, "Incomplete URL detected."
+        )
+        return False
+    
+    is_reel = media_type == 'reel'
+    
+    # Construct a base filename
+    base_name = f"{user_name}-{media_type}-{shortcode[:10].replace('-', '')}"
+    _file_name = f"{base_name}{'.mp4' if is_reel else '.jpg'}" # Default file extension
 
-    user_name = parts[3]
-    shortcode = parts[5]
-    
-    is_reel = parts[4] == 'reel'
-    file_name = f"{user_name}-{'reel' if is_reel else 'post'}-{shortcode.replace('-', '')[:10]}{'.mp4' if is_reel else '.jpg'}"
-    
     colorPrint(
-        CYAN, f"[{get_time_str()}] \t",
-        GREEN, "[INFO] \t\t", 
-        LIGHT_YELLOW_EX, "Fetching media link..."
+        Color.CYAN, f"[{get_time_str()}] \t",
+        Color.GREEN, "[INFO] \t\t", 
+        Color.YELLOW, "Fetching media link..."
     )
     
     response = None
     try:
+        # Re-using the logic to fetch user's feed for post details
         r = requests.get(
             f"https://www.instagram.com/api/v1/users/web_profile_info/?username={user_name}",
             headers={"X-IG-App-ID": "936619743392459"},
@@ -260,27 +311,29 @@ def fetch_media_details(url):
             error_handler(r)
             return False
 
-        edges = r.json()["data"]["user"]["edge_owner_to_timeline_media"]["edges"]
+        # Drill down to the edges array safely
+        edges = r.json().get("data", {}).get("user", {}).get("edge_owner_to_timeline_media", {}).get("edges", [])
         found = False
         for edge in edges:
-            node = edge["node"]
-            if node["shortcode"] == shortcode:
-                is_video = node["is_video"]
-                media_url = node["video_url"] if is_video else node["display_url"]
+            node = edge.get("node", {})
+            if node.get("shortcode") == shortcode:
+                _is_video = node.get("is_video", False)
+                _media_url = node.get("video_url") or node.get("display_url")
                 
-                if is_video and not file_name.endswith('.mp4'):
-                    file_name = file_name[:-4] + '.mp4'
-                elif not is_video and not file_name.endswith('.jpg'):
-                    file_name = file_name[:-4] + '.jpg'
+                # Adjust file extension based on what the API actually returned
+                if _is_video and not _file_name.endswith('.mp4'):
+                    _file_name = _file_name.rsplit('.', 1)[0] + '.mp4'
+                elif not _is_video and not _file_name.endswith('.jpg'):
+                    _file_name = _file_name.rsplit('.', 1)[0] + '.jpg'
                 
                 found = True
                 break
         
         if not found:
             colorPrint(
-                CYAN, f"[{get_time_str()}] \t",
-                RED, "[ERROR] \t",
-                RED, "Post not found in the user's latest feed. (Instagram API limitation)"
+                Color.CYAN, f"[{get_time_str()}] \t",
+                Color.RED, "[ERROR] \t",
+                Color.RED, "Post not found in the user's latest feed. (API limitation)"
             )
             return False
 
@@ -288,87 +341,114 @@ def fetch_media_details(url):
 
     except RequestException as e:
         colorPrint(
-            CYAN, f"[{get_time_str()}] \t",
-            RED, "[REQUEST] \t\b",
-            YELLOW, "[WARNING] \t",
-            RED, f"Network error during media link fetch: {e}"
+            Color.CYAN, f"[{get_time_str()}] \t",
+            Color.RED, "[REQUEST] \t\b",
+            Color.YELLOW, "[WARNING] \t",
+            Color.RED, f"Network error during media link fetch: {e}"
         )
         return False
     except Exception as e:
         status_code = response.status_code if response is not None else "N/A"
         colorPrint(
-            CYAN, f"[{get_time_str()}] \t",
-            RED, f"[{status_code}] \t\t",
-            YELLOW, "[WARNING] \t",
-            RED, f"Failed to fetch media data: {e}"
+            Color.CYAN, f"[{get_time_str()}] \t",
+            Color.RED, f"[{status_code}] \t\t",
+            Color.YELLOW, "[WARNING] \t",
+            Color.RED, f"Failed to fetch media data: {type(e).__name__}: {e}"
         )
         return False
 
 
 def download_media(post_url):
-    global is_video, media_url, file_name
+    """Downloads the media file to the 'InstaDownloads' directory."""
+    global _is_video, _media_url, _file_name
     
     if not fetch_media_details(post_url):
         return
 
-    if not media_url:
+    if not _media_url:
         colorPrint(
-            CYAN, f"[{get_time_str()}] \t",
-            RED, "[ERROR] \t",
-            RED, "Could not extract media URL."
+            Color.CYAN, f"[{get_time_str()}] \t",
+            Color.RED, "[ERROR] \t",
+            Color.RED, "Could not extract media URL."
         )
         return
 
     download_dir = "InstaDownloads"
+    # Create directory if it doesn't exist
     if not os.path.exists(download_dir):
         os.makedirs(download_dir)
 
     colorPrint(
-        CYAN, f"[{get_time_str()}] \t",
-        GREEN, "[INFO] \t\t",
-        LIGHT_YELLOW_EX, "Starting download..."
+        Color.CYAN, f"[{get_time_str()}] \t",
+        Color.GREEN, "[INFO] \t\t",
+        Color.YELLOW, "Starting download..."
     )
     
     try:
         r = requests.get(
-            media_url, 
+            _media_url, 
             headers={"X-IG-App-ID": "936619743392459"},
-            stream=True,
-            timeout=30
+            stream=True, # Essential for downloading large files efficiently
+            timeout=60 # Increased timeout for download
         )
 
         if r.status_code == 200:
-            file_path = os.path.join(download_dir, file_name)
+            file_path = os.path.join(download_dir, _file_name)
+            total_size = int(r.headers.get('content-length', 0))
+            downloaded_size = 0
+            
+            colorPrint(
+                Color.CYAN, f"[{get_time_str()}] \t",
+                Color.GREEN, "[INFO] \t\t",
+                Color.YELLOW, f"Saving as: {Color.ITALIC}{_file_name}{Color.ITALIC_OFF}"
+            )
+
+            # Basic download progress bar
             with open(file_path, "wb") as f:
                 for chunk in r.iter_content(chunk_size=8192):
                     f.write(chunk)
-
+                    downloaded_size += len(chunk)
+                    
+                    # Update progress every few chunks
+                    if total_size > 0 and downloaded_size % (8192 * 50) == 0:
+                        percent = (downloaded_size / total_size) * 100
+                        sys.stdout.write(f"\r[{get_time_str()}] \t [PROGRESS] \t {percent:.2f}% downloaded...")
+                        sys.stdout.flush()
+            
+            # Clear progress bar line
+            sys.stdout.write("\r" + " " * 80 + "\r")
+            sys.stdout.flush()
+            
             colorPrint(
-                CYAN, f"[{get_time_str()}] \t",
-                GREEN, "[SUCCESS] \t",
-                LIGHT_YELLOW_EX, "Downloaded ",
-                LIGHT_BLUE_EX, ITALIC, f"{file_name} ", ITALIC_OFF,
-                LIGHT_YELLOW_EX, f"to {ITALIC}'{download_dir}'{ITALIC_OFF} folder"
+                Color.CYAN, f"[{get_time_str()}] \t",
+                Color.GREEN, "[SUCCESS] \t",
+                Color.YELLOW, "Downloaded ",
+                Color.BLUE, Color.ITALIC, f"{_file_name} ", Color.ITALIC_OFF,
+                Color.YELLOW, f"to {Color.ITALIC}'{download_dir}'{Color.ITALIC_OFF} folder"
             )
         else:
             colorPrint(
-                CYAN, f"[{get_time_str()}] \t",
-                RED, f"[{r.status_code}] \t\t\b",
-                YELLOW, "[WARNING] \t",
-                RED, f"Failed to download media from {media_url}"
+                Color.CYAN, f"[{get_time_str()}] \t",
+                Color.RED, f"[{r.status_code}] \t\t\b",
+                Color.YELLOW, "[WARNING] \t",
+                Color.RED, f"Failed to download media from {_media_url}"
             )
     except RequestException as e:
         colorPrint(
-            CYAN, f"[{get_time_str()}] \t",
-            RED, "[DOWNLOAD ERR] \t\b",
-            YELLOW, "[WARNING] \t",
-            RED, f"Error during media download: {e}"
+            Color.CYAN, f"[{get_time_str()}] \t",
+            Color.RED, "[DOWNLOAD ERR] \t\b",
+            Color.YELLOW, "[WARNING] \t",
+            Color.RED, f"Error during media download: {e}"
         )
 
+def main():
+    """Main function to run the script."""
+    print(f"\n{Color.GREEN}--- Instagram Post Fetcher ---{Color.RESET}")
+    username = input("Enter Instagram username to check: ").strip()
+    if not username:
+        print("Username cannot be empty. Exiting.")
+        sys.exit(1)
+    fetch_data(username)
 
-def time():
-    return get_time_str()
-
-# if __name__ == "__main__":
-#     username = input("Enter Instagram username: ")
-#     fetch_data(username)
+if __name__ == "__main__":
+    main()
