@@ -1,27 +1,18 @@
 #!/usr/bin/env python3
 """
-instagram_session_and_scrape.py
+BrokerOSNIT.py
 
-Merged tool that:
-- Logs into Instagram's mobile API (i.instagram.com) using requests.
-  - Handles two-factor (2FA) challenge: prompts for code with a timeout (default 60s).
-  - Shows a small green CLI loading bar animation while waiting for network/2FA.
-- Prints all cookies found and heuristically labels them (session/auth/csrf/instagram/etc).
-- After showing the session id, prompts the user whether to scrape an account.
-  - If user agrees, prompts for a target (username or numeric id) and uses the obtained sessionid
-    to fetch profile info and an "advanced lookup" (obfuscated email/phone) using the same API calls
-    from the provided scraper script.
-- Shows the same "Your_l0cal_broker" CLI animation during the scraping network calls.
+Fixed behavior for 2FA:
+- When Instagram returns a two-factor challenge the script now prompts the user,
+  submits the provided code to the two-factor endpoint, waits for the response,
+  and proceeds to print cookies and offer scraping.
 
 Usage:
-    python instagram_session_and_scrape.py
+    BrokerOSNIT.py
 
 Dependencies:
-    pip install requests stdiomask phonenumbers pycountry
-  - phonenumbers and pycountry are optional but recommended for better phone/country output.
-
-Responsible use:
-- Only use this script on accounts you are authorized to access.
+    pip install requests stdiomask
+    Optional: pip install phonenumbers pycountry
 """
 
 import os
@@ -57,6 +48,7 @@ GREEN = "\033[92m"
 RESET = "\033[0m"
 CLEAR_LINE = "\033[K"
 
+
 def label_cookie_name(name):
     n = (name or "").lower()
     if any(k in n for k in ("session", "sess", "sid", "sessionid")):
@@ -73,6 +65,7 @@ def label_cookie_name(name):
         return "locale"
     return "other"
 
+
 def animate_loading(stop_event, message=MESSAGE, bar_len=ANIM_BAR_LEN, step_delay=ANIM_STEP_DELAY):
     """
     Animate a moving green bar and reveal `message` one letter at a time beneath it.
@@ -83,7 +76,6 @@ def animate_loading(stop_event, message=MESSAGE, bar_len=ANIM_BAR_LEN, step_dela
     revealed = 0
     try:
         while not stop_event.is_set():
-            # build moving segment
             bar = [" "] * bar_len
             for i in range(width):
                 idx = (pos + i) % bar_len
@@ -94,22 +86,22 @@ def animate_loading(stop_event, message=MESSAGE, bar_len=ANIM_BAR_LEN, step_dela
             if revealed < len(message):
                 revealed += 1
             line2 = message[:revealed]
-            # print and move cursor up 2 lines so next overwrite works
             sys.stdout.write("\r" + CLEAR_LINE + line1 + "\n" + CLEAR_LINE + line2 + "\n")
             sys.stdout.flush()
             sys.stdout.write("\033[2A")
             time.sleep(step_delay)
-        # when stopping, clear and print final message fully revealed
+        # final print: reveal message fully and stop
         sys.stdout.write("\r" + CLEAR_LINE + " " * (bar_len + 2) + "\n" + CLEAR_LINE + message + "\n")
         sys.stdout.flush()
-    except KeyboardInterrupt:
+    except Exception:
+        # ensure stop_event is set on any error to prevent orphaned threads
         stop_event.set()
-        return
+
 
 def input_with_timeout(prompt, timeout, stop_event):
     """
-    Get input from user with timeout seconds.
-    Returns None if timed out. If stopped by stop_event, returns None.
+    Get input from user with timeout seconds. Returns None if timed out.
+    If stop_event is set while waiting, returns None.
     """
     q = queue.Queue()
 
@@ -126,14 +118,17 @@ def input_with_timeout(prompt, timeout, stop_event):
         res = q.get(timeout=timeout)
         return res
     except queue.Empty:
-        stop_event.set()  # signal animation or other waiters
+        # signal any animation to stop
+        stop_event.set()
         return None
+
 
 def safe_json(resp):
     try:
         return resp.json()
     except Exception:
         return {}
+
 
 # ----------------- Instagram API helper functions (from provided scraper) -----------------
 
@@ -155,6 +150,7 @@ def getUserId(username, sessionsId):
         return {"id": id, "error": None}
     except ValueError:
         return {"id": None, "error": "Rate limit or invalid response"}
+
 
 def getInfo(search, sessionId, searchType="username"):
     if searchType == "username":
@@ -189,8 +185,10 @@ def getInfo(search, sessionId, searchType="username"):
     except requests.exceptions.RequestException:
         return {"user": None, "error": "Not found"}
 
+
 from urllib.parse import quote_plus
 from json import dumps, decoder
+
 
 def advanced_lookup(username):
     """
@@ -224,15 +222,16 @@ def advanced_lookup(username):
     except decoder.JSONDecodeError:
         return ({"user": None, "error": "rate limit"})
 
+
 # ----------------- Main flow -----------------
+
 
 def do_login_interactive():
     """
     Perform login to Instagram mobile API with 2FA handling.
     Returns a requests.Session() (logged-in) and a dict of cookies, or (None, None) on failure.
     """
-    print(f"[*] Session ID Grabber with 2FA")
-    print("")
+    print(f"[*] Session ID Grabber with 2FA\n")
 
     username = input(f"[+] Enter Username: ").strip()
     password = stdiomask.getpass(f"[+] Enter Password: ").strip()
@@ -265,7 +264,7 @@ def do_login_interactive():
     anim_thread = threading.Thread(target=animate_loading, args=(stop_event,), daemon=True)
 
     try:
-        # Start animation while we make the initial login request
+        # initial login request with animation
         stop_event.clear()
         anim_thread.start()
         try:
@@ -286,9 +285,10 @@ def do_login_interactive():
             input("[+] Press Enter to exit...")
             return None, None
 
-        # Detect two-factor required
+        # Detect two-factor required (handle truthy strings as well)
         two_factor_required = False
         two_factor_identifier = None
+        # support both boolean and string indicators
         if j.get("two_factor_required") or j.get("two_factor_info"):
             two_factor_required = True
             info = j.get("two_factor_info") or {}
@@ -304,9 +304,9 @@ def do_login_interactive():
             if two_factor_identifier:
                 print(f"    two_factor_identifier: {two_factor_identifier}")
             else:
-                print("    (no two_factor_identifier found; the code prompt will still be attempted)")
+                print("    (no two_factor_identifier found; we'll still attempt submission)")
 
-            # Prompt for 2FA code with timeout while showing animation
+            # Prompt for 2FA code with animation and timeout
             stop_event.clear()
             anim_thread = threading.Thread(target=animate_loading, args=(stop_event,), daemon=True)
             anim_thread.start()
@@ -321,15 +321,18 @@ def do_login_interactive():
                 input("[+] Press Enter to exit...")
                 return None, None
 
+            # Prepare payload. Instagram's two_factor endpoint expects 'verification_code' and two_factor_identifier
             two_data = {
                 "username": username,
-                "verificationCode": code,
                 "verification_code": code,
                 "device_id": device_id,
-                "two_factor_identifier": two_factor_identifier or "",
+                "phone_id": phone_id,
                 "trust_this_device": "1",
             }
-            # start animation while posting 2fa
+            if two_factor_identifier:
+                two_data["two_factor_identifier"] = two_factor_identifier
+
+            # POST two-factor verification (animation while network call runs)
             stop_event.clear()
             anim_thread = threading.Thread(target=animate_loading, args=(stop_event,), daemon=True)
             anim_thread.start()
@@ -345,19 +348,33 @@ def do_login_interactive():
             j2 = safe_json(r2)
             text2 = r2.text or ""
 
-            if 'logged_in_user' in text2 or (j2.get("status") == "ok" and j2.get("logged_in_user")):
+            # Consider login success if 'logged_in_user' present or status ok and cookies set
+            success = False
+            if 'logged_in_user' in text2:
+                success = True
+            elif isinstance(j2, dict) and (j2.get("status") == "ok" and j2.get("logged_in_user")):
+                success = True
+            # Also accept presence of sessionid cookie set in session
+            cookie_dict_after = s.cookies.get_dict()
+            if not success and any(label_cookie_name(n) == "session" for n in cookie_dict_after.keys()):
+                success = True
+
+            if success:
                 print("\n\n[+] Logged In Success (2FA).")
             else:
-                if j2.get("status") == "fail":
+                # Helpful debug output for failure
+                if isinstance(j2, dict) and j2.get("status") == "fail":
                     print("\n\n[!] 2FA submission failed:", j2.get("message", text2))
                 else:
-                    print("\n\n[!] 2FA response did not indicate success. Response:")
-                    print(text2)
+                    print("\n\n[!] 2FA response did not indicate success. Response (truncated):")
+                    displayed = text2[:1500] + ("..." if len(text2) > 1500 else "")
+                    print(displayed)
                 input("[+] Press Enter to exit...")
                 return None, None
+
         else:
             # Not 2FA required; check if login success
-            if 'logged_in_user' in text or (j.get("status") == "ok" and j.get("logged_in_user")):
+            if 'logged_in_user' in text or (isinstance(j, dict) and j.get("status") == "ok" and j.get("logged_in_user")):
                 print("\n\n[+] Logged In Success.")
             else:
                 # unknown response
@@ -397,6 +414,7 @@ def do_login_interactive():
             stop_event.set()
         except Exception:
             pass
+
 
 def prompt_and_scrape(session_cookies):
     """
@@ -528,6 +546,7 @@ def prompt_and_scrape(session_cookies):
     print("-" * 24)
     print("Profile Picture        : " + str(user.get("hd_profile_pic_url_info", {}).get("url", "")))
 
+
 def main():
     s, cookies = do_login_interactive()
     if s is None:
@@ -537,6 +556,7 @@ def main():
     prompt_and_scrape(cookies)
 
     input("\n[+] Done. Press Enter to exit...")
+
 
 if __name__ == "__main__":
     main()
