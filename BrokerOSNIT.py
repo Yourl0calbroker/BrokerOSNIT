@@ -65,7 +65,8 @@ WEB_PROFILE_INFO = "https://i.instagram.com/api/v1/users/web_profile_info/?usern
 USER_INFO = "https://i.instagram.com/api/v1/users/{user_id}/info/"
 USER_FEED = "https://i.instagram.com/api/v1/feed/user/{user_id}/?count={count}"
 LOOKUP = "https://i.instagram.com/api/v1/users/lookup/"
-MEDIA_URL_TEMPLATE = "https://i.instagram.com/api/v1/media/{media_id}/info/"
+USERNAME_INFO = "https://i.instagram.com/api/v1/users/{username}/usernameinfo/"
+WWW_PROFILE_A1 = "https://www.instagram.com/{username}/?__a=1&__d=dis"
 # ---------------------------------
 
 GREEN = "\033[92m"
@@ -90,7 +91,7 @@ def label_cookie_name(name):
         return "locale"
     return "other"
 
-def animate_loading(stop_event, message=MESSAGE, bar_len=ANIM_BAR_LEN, step_delay=ANIM_BAR_LEN and ANIM_STEP_DELAY):
+def animate_loading(stop_event, message=MESSAGE, bar_len=ANIM_BAR_LEN, step_delay=ANIM_STEP_DELAY):
     pos = 0
     width = max(3, bar_len // 4)
     revealed = 0
@@ -160,7 +161,6 @@ def format_phone(public_phone_country_code, public_phone_number):
         return phonenr
 
 def head_request_headers(url, cookies=None, headers=None, timeout=15):
-    """Perform a HEAD request and return selected headers. Return dict or None on error."""
     try:
         r = requests.head(url, cookies=cookies, headers=headers or {}, timeout=timeout, allow_redirects=True)
         return {
@@ -182,12 +182,11 @@ def epoch_to_iso(ts):
     except Exception:
         return str(ts)
 
-# ---- Instagram data collectors (best-effort) ----
+# ---- Instagram data collectors ----
 
 def get_user_web_profile(username, sessionid=None):
-    """Call web_profile_info endpoint (returns web visible profile)."""
     url = WEB_PROFILE_INFO.format(username=username)
-    headers = {"User-Agent": "Mozilla/5.0 (compatible)"}
+    headers = {"User-Agent": "Mozilla/5.0 (compatible)", "x-ig-app-id": "936619743392459"}
     cookies = {'sessionid': sessionid} if sessionid else None
     try:
         r = requests.get(url, headers=headers, cookies=cookies, timeout=15)
@@ -195,7 +194,7 @@ def get_user_web_profile(username, sessionid=None):
         return {"error": f"network: {e}"}
     if r.status_code == 404:
         return {"error": "not_found", "raw": safe_json(r)}
-    return {"raw": safe_json(r)}
+    return {"raw": safe_json(r), "status_code": r.status_code}
 
 def get_user_info_private(user_id, sessionid):
     url = USER_INFO.format(user_id=user_id)
@@ -206,10 +205,9 @@ def get_user_info_private(user_id, sessionid):
         return {"error": f"network: {e}"}
     if r.status_code == 429:
         return {"error": "rate_limit", "raw": safe_json(r)}
-    return {"raw": safe_json(r)}
+    return {"raw": safe_json(r), "status_code": r.status_code}
 
 def get_feed_media(user_id, sessionid, count=12):
-    """Fetch recent media feed for the user (items may include location and timestamps)."""
     url = USER_FEED.format(user_id=user_id, count=count)
     headers = {"User-Agent": "Instagram 64.0.0.14.96"}
     try:
@@ -218,7 +216,7 @@ def get_feed_media(user_id, sessionid, count=12):
         return {"error": f"network: {e}"}
     if r.status_code == 429:
         return {"error": "rate_limit", "raw": safe_json(r)}
-    return {"raw": safe_json(r)}
+    return {"raw": safe_json(r), "status_code": r.status_code}
 
 def do_advanced_lookup(username, sessionid=None):
     data = "signed_body=SIGNATURE." + json.dumps({"q": username, "skip_recovery": "1"}, separators=(",", ":"))
@@ -234,41 +232,50 @@ def do_advanced_lookup(username, sessionid=None):
     except Exception as e:
         return {"error": f"network: {e}"}
     try:
-        return {"raw": r.json()}
+        return {"raw": r.json(), "status_code": r.status_code}
     except Exception:
-        return {"raw_text": r.text}
+        return {"raw_text": r.text, "status_code": r.status_code}
 
-# ---- aggregation / inference helpers ----
+def get_usernameinfo(username, sessionid=None):
+    url = USERNAME_INFO.format(username=username)
+    headers = {"User-Agent": "Instagram 64.0.0.14.96", "x-ig-app-id": "936619743392459"}
+    try:
+        r = requests.get(url, headers=headers, cookies={'sessionid': sessionid} if sessionid else None, timeout=15)
+    except Exception as e:
+        return {"error": f"network: {e}"}
+    return {"status_code": r.status_code, "raw": safe_json(r), "text": r.text}
+
+def get_www_profile_a1(username):
+    url = WWW_PROFILE_A1.format(username=username)
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Accept": "application/json"}
+    try:
+        r = requests.get(url, headers=headers, timeout=15)
+    except Exception as e:
+        return {"error": f"network: {e}"}
+    return {"status_code": r.status_code, "raw": safe_json(r), "text": r.text}
+
+# ---- helpers for inference ----
 
 def extract_profile_picture_info(user_raw, sessionid):
-    """Find profile pic url and gather CDN/HEAD metadata."""
-    # check common fields
     url_candidates = []
-    # web_profile_info path: data.user.profile_pic_url or profile_pic_url_hd
     try:
         if isinstance(user_raw, dict):
-            # try common shapes
             for path in (
                 ("profile_pic_url_hd",),
                 ("profile_pic_url",),
                 ("hd_profile_pic_url_info", "url"),
-                ("hd_profile_pic_versions", 0),
             ):
                 cur = user_raw
                 for p in path:
                     if cur is None:
                         break
-                    if isinstance(p, int):
-                        cur = cur[p] if isinstance(cur, list) and len(cur) > p else None
-                    else:
-                        cur = cur.get(p) if isinstance(cur, dict) else None
+                    cur = cur.get(p) if isinstance(cur, dict) else None
                 if isinstance(cur, str) and cur:
                     url_candidates.append(cur)
                 elif isinstance(cur, dict) and cur.get("url"):
                     url_candidates.append(cur.get("url"))
     except Exception:
         pass
-    # unique
     url_candidates = [u for i, u in enumerate(url_candidates) if u and u not in url_candidates[:i]]
     results = []
     for u in url_candidates:
@@ -277,19 +284,9 @@ def extract_profile_picture_info(user_raw, sessionid):
     return results
 
 def infer_locations_from_feed(feed_raw):
-    """Extract any location objects or place names in recent feed items."""
     if not isinstance(feed_raw, dict):
-        return []
-    items = feed_raw.get("items") or feed_raw.get("items", []) or feed_raw.get("items", [])
-    # private API often returns 'items' list
-    if not items and isinstance(feed_raw.get("items"), list):
-        items = feed_raw.get("items")
-    if not items:
-        # some responses use 'user' -> 'media' etc; try to find any 'items' or 'posts'
-        for v in feed_raw.values():
-            if isinstance(v, list) and v and isinstance(v[0], dict) and ("taken_at" in v[0] or "id" in v[0]):
-                items = v
-                break
+        return {"locations": [], "last_post_ts": None}
+    items = feed_raw.get("items") or []
     locations = []
     last_post_ts = None
     for it in items or []:
@@ -304,23 +301,16 @@ def infer_locations_from_feed(feed_raw):
                     "lng": loc.get("lng")
                 }
                 locations.append(place)
-            # taken time
             taken = it.get("taken_at") or it.get("device_timestamp") or it.get("timestamp")
             if taken:
                 try:
                     ts = int(taken)
                 except Exception:
-                    # sometimes ISO
-                    try:
-                        ts = int(datetime.fromisoformat(taken).timestamp())
-                    except Exception:
-                        ts = None
-                if ts:
-                    if not last_post_ts or ts > last_post_ts:
-                        last_post_ts = ts
+                    ts = None
+                if ts and (not last_post_ts or ts > last_post_ts):
+                    last_post_ts = ts
         except Exception:
             continue
-    # dedupe location names
     uniq = []
     seen = set()
     for l in locations:
@@ -331,30 +321,17 @@ def infer_locations_from_feed(feed_raw):
     return {"locations": uniq, "last_post_ts": last_post_ts}
 
 def try_get_last_active(user_raw, feed_info):
-    """
-    Heuristic last-active inference:
-    - prefer most recent post timestamp
-    - fallback to 'story' or 'last_online' fields in raw JSON if present
-    """
-    # look for explicit presence fields
     if isinstance(user_raw, dict):
-        # search known keys
         for k in ("last_activity_at", "last_online_time", "last_seen", "last_activity"):
             v = user_raw.get(k)
             if v:
                 return v
-    # from feed
     if feed_info and feed_info.get("last_post_ts"):
         return epoch_to_iso(feed_info["last_post_ts"])
     return None
 
 def gather_linked_accounts(user_raw, lookup_raw):
-    """
-    Inspect raw JSONs for possible linked accounts, fb connections, connected_accounts, external urls,
-    and attempt to list any usernames / ids that appear related.
-    """
     linked = {"facebook_pages": [], "connected_accounts": [], "external_urls": [], "emails": [], "phones": []}
-    # look through user_raw dict for predictable keys
     def scan_for_keys(obj):
         if not isinstance(obj, dict):
             return
@@ -383,7 +360,6 @@ def gather_linked_accounts(user_raw, lookup_raw):
             except Exception:
                 continue
     scan_for_keys(user_raw or {})
-    # lookup_raw may contain obfuscated_email/phone etc
     if isinstance(lookup_raw, dict):
         for k, v in lookup_raw.items():
             lk = str(k).lower()
@@ -393,10 +369,8 @@ def gather_linked_accounts(user_raw, lookup_raw):
                 linked["emails"].append(v)
             if "phone" in lk and isinstance(v, str):
                 linked["phones"].append(v)
-            # facebook pages or linked ig accounts sometimes appear
             if "facebook" in lk or "fb" in lk:
                 linked["facebook_pages"].append({k: v})
-    # dedupe lists
     for k in linked:
         seen = set()
         out = []
@@ -411,10 +385,97 @@ def gather_linked_accounts(user_raw, lookup_raw):
         linked[k] = out
     return linked
 
-# ---- High-level orchestrator & UI ----
+# ---- New: robust ID resolution ----
+
+def resolve_user_id(username, sessionid=None):
+    """
+    Try several endpoints to resolve a username to a numeric user id (pk).
+    Returns a tuple: (user_id as str or None, source string, raw_response)
+    Sources tried (in order):
+      - i.instagram.com /web_profile_info
+      - users/lookup (advanced_lookup)
+      - i.instagram.com /usernameinfo
+      - www.instagram.com ?__a=1 public web
+    """
+    # 1) web_profile_info
+    try:
+        res = get_user_web_profile(username, sessionid)
+        raw = res.get("raw")
+        if isinstance(raw, dict):
+            # typical path: raw["data"]["user"]["id"]
+            u = raw.get("data", {}).get("user")
+            if isinstance(u, dict):
+                pk = u.get("id") or u.get("pk")
+                if pk:
+                    return str(pk), "web_profile_info", raw
+    except Exception:
+        pass
+
+    # 2) advanced lookup (users/lookup)
+    try:
+        res = do_advanced_lookup(username, sessionid)
+        raw = res.get("raw") or {}
+        # some responses nest user info or contain 'user' object
+        if isinstance(raw, dict):
+            # attempt a few common places for pk
+            #  - raw.get('user', {}).get('pk') or raw.get('user', {}).get('id')
+            user_node = None
+            if raw.get("user"):
+                user_node = raw.get("user")
+            # sometimes 'users' or first element exists
+            if not user_node:
+                for k in ("users", "user", "data"):
+                    if raw.get(k):
+                        maybe = raw.get(k)
+                        if isinstance(maybe, list) and maybe:
+                            user_node = maybe[0]
+                        elif isinstance(maybe, dict):
+                            user_node = maybe
+            if isinstance(user_node, dict):
+                pk = user_node.get("pk") or user_node.get("id")
+                if pk:
+                    return str(pk), "users/lookup", raw
+    except Exception:
+        pass
+
+    # 3) usernameinfo endpoint
+    try:
+        res = get_usernameinfo(username, sessionid)
+        raw = res.get("raw")
+        if isinstance(raw, dict):
+            # path might be raw.get("user", {}).get("pk")
+            user_node = raw.get("user") or raw
+            if isinstance(user_node, dict):
+                pk = user_node.get("pk") or user_node.get("id")
+                if pk:
+                    return str(pk), "usernameinfo", raw
+    except Exception:
+        pass
+
+    # 4) public web ?__a=1
+    try:
+        res = get_www_profile_a1(username)
+        raw = res.get("raw")
+        if isinstance(raw, dict):
+            # depending on Instagram version, the structure can vary
+            # try common patterns:
+            #   raw.get("graphql", {}).get("user", {}).get("id")
+            g = raw.get("graphql") or raw.get("data") or raw
+            if isinstance(g, dict):
+                u = g.get("user") or g.get("profile") or g
+                if isinstance(u, dict):
+                    pk = u.get("id") or u.get("pk")
+                    if pk:
+                        return str(pk), "www_profile_a1", raw
+    except Exception:
+        pass
+
+    # failed
+    return None, None, None
+
+# ---- UI / aggregation / investigator (unchanged except integration) ----
 
 def print_account_summary(user):
-    """Nicely formatted concise summary."""
     print("\n===== Account Summary =====")
     def p(k, label=None):
         if k in user and user.get(k) not in (None, "", [], {}):
@@ -447,11 +508,10 @@ def print_account_summary(user):
             print(f"{'Public phone':22}: {ph}")
     print("=" * 28)
 
+# Reuse interactive_user_menu_full from previous code (omitted here for brevity)
+# For clarity I will include a simplified menu that calls the same functions used earlier.
+
 def interactive_user_menu_full(user_raw, sessionid, cookie_dict, web_raw=None, lookup_raw=None, feed_raw=None, feed_media_meta=None):
-    """
-    Provide interactive exploration, now including Extended Investigator (media, linked accounts, profile-pic metadata).
-    """
-    # Precompute aggregated things
     feed_info = infer_locations_from_feed(feed_raw) if feed_raw else {"locations": [], "last_post_ts": None}
     linked = gather_linked_accounts(user_raw, lookup_raw)
     pic_infos = extract_profile_picture_info(user_raw or web_raw or lookup_raw, sessionid)
@@ -463,7 +523,7 @@ def interactive_user_menu_full(user_raw, sessionid, cookie_dict, web_raw=None, l
         print("  3) View Web Profile JSON (web_profile_info)")
         print("  4) Advanced Lookup (raw)")
         print("  5) Recent Media & Locations")
-        print("  6) Extended Investigator (linked accounts, contacts, profile-pic metadata, last active heuristics)")
+        print("  6) Extended Investigator")
         print("  7) View Cookies")
         print("  8) Exit to previous menu")
         choice = input("Enter choice [1-8]: ").strip()
@@ -476,11 +536,10 @@ def interactive_user_menu_full(user_raw, sessionid, cookie_dict, web_raw=None, l
         elif choice == "4":
             pretty_print_json(lookup_raw, label="Advanced lookup JSON")
         elif choice == "5":
-            # show feed items summary
             if not feed_raw or not isinstance(feed_raw, dict):
                 print("[!] No feed data available.")
                 continue
-            items = feed_raw.get("items") or feed_raw.get("items", []) or []
+            items = feed_raw.get("items") or []
             print(f"\nRecent media count shown: {len(items)} (first {min(12, len(items))})")
             for idx, it in enumerate(items[:12]):
                 taken = it.get("taken_at") or it.get("device_timestamp")
@@ -488,28 +547,29 @@ def interactive_user_menu_full(user_raw, sessionid, cookie_dict, web_raw=None, l
                 caption = None
                 if isinstance(it.get("caption"), dict):
                     caption = it["caption"].get("text")
-                elif it.get("organic_tracking_token"):
-                    caption = "(has tracking token)"
                 media_id = it.get("id") or it.get("pk")
                 print(f"\n[{idx+1}] id: {media_id}")
                 print(f"    taken_at: {t_iso}")
                 if it.get("location"):
                     loc = it.get("location")
                     print(f"    location: {loc.get('name')}  (lat:{loc.get('lat')}, lng:{loc.get('lng')})")
-                # media URLs
-                display_url = it.get("image_versions2", {}).get("candidates", [{}])[0].get("url") if it.get("image_versions2") else it.get("carousel_media", [{}])[0].get("image_versions2", {}).get("candidates", [{}])[0].get("url")
+                display_url = None
+                if isinstance(it.get("image_versions2"), dict):
+                    candidates = it["image_versions2"].get("candidates", [])
+                    if candidates:
+                        display_url = candidates[0].get("url")
+                if not display_url and isinstance(it.get("carousel_media"), list) and it["carousel_media"]:
+                    cm = it["carousel_media"][0]
+                    if isinstance(cm.get("image_versions2"), dict):
+                        display_url = cm["image_versions2"].get("candidates", [{}])[0].get("url")
                 if display_url:
                     print(f"    media_url: {display_url}")
-                    # if we fetched HEAD metadata earlier, show it
                     if feed_media_meta and media_id and media_id in feed_media_meta:
-                        meta = feed_media_meta[media_id]
-                        print(f"    media_head: {meta}")
+                        print(f"    media_head: {feed_media_meta[media_id]}")
                 if caption:
                     print(f"    caption: {caption[:160] + ('...' if len(caption) > 160 else '')}")
         elif choice == "6":
-            # Extended Investigator
             print("\n=== Extended Investigator ===")
-            # linked accounts & contacts
             print("\n- Linked / Connected Accounts & Contacts -")
             if any(linked.values()):
                 if linked.get("connected_accounts"):
@@ -532,24 +592,18 @@ def interactive_user_menu_full(user_raw, sessionid, cookie_dict, web_raw=None, l
                         print("  - " + str(p))
             else:
                 print("No linked accounts / contacts detected in returned JSON.")
-
-            # last active heuristics
             print("\n- Activity / Last-seen heuristics -")
             last_active = try_get_last_active(user_raw, feed_info)
             if last_active:
                 print(f"Last activity (heuristic): {last_active}")
             else:
                 print("No explicit last-active info; no recent posts found to infer last activity.")
-
-            # media locations
             print("\n- Recent media locations (inferred) -")
             if feed_info.get("locations"):
                 for loc in feed_info["locations"]:
                     print(f"  - {loc.get('name')} (pk={loc.get('pk')}) lat={loc.get('lat')} lng={loc.get('lng')}")
             else:
                 print("  No locations found in recent media items.")
-
-            # profile picture metadata
             print("\n- Profile picture & CDN metadata -")
             if pic_infos:
                 for p in pic_infos:
@@ -560,13 +614,8 @@ def interactive_user_menu_full(user_raw, sessionid, cookie_dict, web_raw=None, l
                         print(f"    last_modified: {p['head'].get('last_modified')}  etag: {p['head'].get('etag')}")
                     else:
                         print("    (HEAD request failed or not available)")
-                    # attempt to parse timestamp from URL if possible (some CDN URLs include time-ish tokens)
-                    # show raw URL as source clue
-                    # no more deobfuscation attempted
             else:
                 print("  No profile picture URL discovered in returned JSON.")
-
-            # show web and lookup raw (compact)
             print("\n- Raw sources available -")
             if web_raw:
                 print("web_profile_info: available")
@@ -588,7 +637,7 @@ def interactive_user_menu_full(user_raw, sessionid, cookie_dict, web_raw=None, l
         else:
             print("[!] Invalid choice. Enter 1-8.")
 
-# ---- Login & main flows (unchanged core, improved integration) ----
+# ---- Login & main flows ----
 
 def do_login_interactive():
     print(f"[*] Session ID Grabber with 2FA\n")
@@ -771,7 +820,6 @@ def prompt_and_scrape(session_cookies):
         print("[!] No target provided. Exiting.")
         return
 
-    # determine search type
     if target.isdigit():
         search_type = "id"
         user_id = target
@@ -781,98 +829,99 @@ def prompt_and_scrape(session_cookies):
         username = target
         user_id = None
 
-    # gather raw sources
     web_raw = None
     user_raw = None
     lookup_raw = None
     feed_raw = None
     feed_media_meta = {}
 
-    # 1) web_profile_info (helps get user id and web-visible fields)
-    if username:
-        stop = threading.Event()
-        t = threading.Thread(target=animate_loading, args=(stop,), daemon=True)
-        stop.clear(); t.start()
-        web_raw_res = get_user_web_profile(username, sessionid)
-        stop.set(); t.join(timeout=0.5)
-        web_raw = web_raw_res.get("raw") or web_raw_res.get("raw_text")
-        # try to obtain user_id from web_raw
-        try:
-            if isinstance(web_raw, dict) and web_raw.get("data") and web_raw["data"].get("user"):
-                user_id = web_raw["data"]["user"].get("id") or user_id
-        except Exception:
-            pass
+    # Try to resolve user_id for a username using multiple fallbacks
+    if username and not user_id:
+        user_id, source, raw_used = resolve_user_id(username, sessionid)
+        if user_id:
+            print(f"[+] Resolved username '{username}' -> user_id {user_id} (source: {source})")
+            if source == "web_profile_info":
+                web_raw = raw_used
+            elif source == "users/lookup":
+                lookup_raw = raw_used
+            elif source == "usernameinfo":
+                web_raw = raw_used
+            elif source == "www_profile_a1":
+                web_raw = raw_used
+        else:
+            print(f"[!] Could not resolve user id for '{username}' from available endpoints.")
+            # Show what each endpoint returned for debugging (non-fatal)
+            print("[*] Showing quick diagnostics (web_profile_info, usernameinfo, lookup, www_profile_a1):")
+            try:
+                diagnostics = {}
+                d = get_user_web_profile(username, sessionid)
+                diagnostics['web_profile_info'] = d.get("raw") or d.get("error")
+                e = do_advanced_lookup(username, sessionid)
+                diagnostics['lookup'] = e.get("raw") or e.get("raw_text") or e.get("error")
+                f = get_usernameinfo(username, sessionid)
+                diagnostics['usernameinfo'] = f.get("raw") or f.get("error")
+                g = get_www_profile_a1(username)
+                diagnostics['www_profile_a1'] = g.get("raw") or g.get("text") or g.get("error")
+                pretty_print_json(diagnostics, label="diagnostics")
+            except Exception:
+                pass
+            return
 
-    # 2) private user info (users/{id}/info/)
+    # proceed to fetch private info, feed, lookup etc if we have user_id
     if user_id:
-        stop = threading.Event()
-        t = threading.Thread(target=animate_loading, args=(stop,), daemon=True)
+        stop = threading.Event(); t = threading.Thread(target=animate_loading, args=(stop,), daemon=True)
         stop.clear(); t.start()
         user_info_res = get_user_info_private(user_id, sessionid)
         stop.set(); t.join(timeout=0.5)
         user_raw = user_info_res.get("raw") or user_info_res.get("error")
-        # if user_raw contains username and username not set, set it
-        if isinstance(user_raw, dict):
-            username = username or user_raw.get("user", {}).get("username") or user_raw.get("user", {}).get("external_id")
-            # some variants return 'user' wrapper
-            if user_raw.get("user"):
-                user_raw = user_raw.get("user")
-    else:
-        print("[!] Could not resolve user id from web_profile_info; try using a username instead.")
-        return
 
-    # 3) advanced lookup
-    stop = threading.Event()
-    t = threading.Thread(target=animate_loading, args=(stop,), daemon=True)
-    stop.clear(); t.start()
-    lookup_res = do_advanced_lookup(username, sessionid)
-    stop.set(); t.join(timeout=0.5)
-    lookup_raw = lookup_res.get("raw") or lookup_res.get("raw_text")
+        stop = threading.Event(); t = threading.Thread(target=animate_loading, args=(stop,), daemon=True)
+        stop.clear(); t.start()
+        lookup_res = do_advanced_lookup(username or user_raw.get("username", ""), sessionid)
+        stop.set(); t.join(timeout=0.5)
+        lookup_raw = lookup_res.get("raw") or lookup_res.get("raw_text")
 
-    # 4) recent media feed to gather locations & timestamps
-    stop = threading.Event()
-    t = threading.Thread(target=animate_loading, args=(stop,), daemon=True)
-    stop.clear(); t.start()
-    feed_res = get_feed_media(user_id, sessionid, count=12)
-    stop.set(); t.join(timeout=0.5)
-    feed_raw = feed_res.get("raw") or {}
+        stop = threading.Event(); t = threading.Thread(target=animate_loading, args=(stop,), daemon=True)
+        stop.clear(); t.start()
+        feed_res = get_feed_media(user_id, sessionid, count=12)
+        stop.set(); t.join(timeout=0.5)
+        feed_raw = feed_res.get("raw") or {}
 
-    # Attempt to collect HEAD metadata for media items in feed
-    try:
-        items = feed_raw.get("items") or []
-        for it in items[:12]:
-            media_id = it.get("id") or it.get("pk")
-            # try to find display url candidate
-            display_url = None
-            if isinstance(it.get("image_versions2"), dict):
-                candidates = it["image_versions2"].get("candidates", [])
-                if candidates:
-                    display_url = candidates[0].get("url")
-            # carousel case
-            if not display_url and isinstance(it.get("carousel_media"), list) and it["carousel_media"]:
-                cm = it["carousel_media"][0]
-                if isinstance(cm.get("image_versions2"), dict):
-                    display_url = cm["image_versions2"].get("candidates", [{}])[0].get("url")
-            if display_url and media_id:
-                hdr = head_request_headers(display_url, cookies={'sessionid': sessionid})
-                feed_media_meta[media_id] = hdr
-    except Exception:
-        pass
+        # gather media HEAD info for first items
+        try:
+            items = feed_raw.get("items") or []
+            for it in items[:12]:
+                media_id = it.get("id") or it.get("pk")
+                display_url = None
+                if isinstance(it.get("image_versions2"), dict):
+                    candidates = it["image_versions2"].get("candidates", [])
+                    if candidates:
+                        display_url = candidates[0].get("url")
+                if not display_url and isinstance(it.get("carousel_media"), list) and it["carousel_media"]:
+                    cm = it["carousel_media"][0]
+                    if isinstance(cm.get("image_versions2"), dict):
+                        display_url = cm["image_versions2"].get("candidates", [{}])[0].get("url")
+                if display_url and media_id:
+                    hdr = head_request_headers(display_url, cookies={'sessionid': sessionid})
+                    feed_media_meta[media_id] = hdr
+        except Exception:
+            pass
 
-    # Create a clean user dict for summary: normalize fields
-    if not isinstance(user_raw, dict):
-        print("[!] Unexpected user object received; showing raw JSONs for inspection.")
-        pretty_print_json(user_raw, label="User raw")
-        return
+        # normalize and ensure user_raw is a dict for summary
+        if isinstance(user_raw, dict) and user_raw.get("user"):
+            # some responses return wrapper { "user": { ... } }
+            if isinstance(user_raw.get("user"), dict):
+                user_raw = user_raw["user"]
+        if not isinstance(user_raw, dict):
+            print("[!] Unexpected user object received; showing raw JSONs for inspection.")
+            pretty_print_json(user_raw, label="User raw")
+            return
+        if "username" not in user_raw and username:
+            user_raw["username"] = username
+        if "userID" not in user_raw and user_id:
+            user_raw["userID"] = str(user_id)
 
-    # add some normalized convenience keys if missing
-    if "username" not in user_raw and username:
-        user_raw["username"] = username
-    if "userID" not in user_raw and user_id:
-        user_raw["userID"] = str(user_id)
-
-    # Launch interactive exploration with all collected sources
-    interactive_user_menu_full(user_raw, sessionid, session_cookies, web_raw=web_raw, lookup_raw=lookup_raw, feed_raw=feed_raw, feed_media_meta=feed_media_meta)
+        interactive_user_menu_full(user_raw, sessionid, session_cookies, web_raw=web_raw, lookup_raw=lookup_raw, feed_raw=feed_raw, feed_media_meta=feed_media_meta)
 
 def main():
     s, cookies = do_login_interactive()
