@@ -12,7 +12,7 @@ Enter Username And Password To Retrieve Your Session ID
 
 Run with command 
 
-cd BrokerOsnit
+cd BrokerOSNIT-Instagram-
 
-python3 ./BrokerOSNIT.py
+python3 ./BrokerOSNIT-Instagram-.py
 
