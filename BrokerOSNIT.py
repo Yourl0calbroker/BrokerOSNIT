@@ -2,26 +2,21 @@
 """
 BrokerOSNIT.py
 
-Fixed behavior for 2FA:
-- When Instagram returns a two-factor challenge the script now prompts the user,
-  submits the provided code to the two-factor endpoint, waits for the response,
-  and proceeds to print cookies and offer scraping.
-
 Usage:
-    BrokerOSNIT.py
+cd BrokerOSNIT
+Python3 ./BrokerOSNIT.py
 
 Dependencies:
     pip install requests stdiomask
     Optional: pip install phonenumbers pycountry
 """
-
+from uuid import uuid4
 import os
 import sys
 import re
 import time
 import queue
 import threading
-from uuid import uuid4
 
 import requests
 import stdiomask
@@ -36,7 +31,7 @@ except Exception:
     HAS_PHONE = False
 
 # ------------ Config ------------
-OTP_TIMEOUT = 60  # seconds to wait for 2FA code
+OTP_TIMEOUT = 60  # seconds to wait for 2FA code / 2FA request timeout
 ANIM_BAR_LEN = 30
 ANIM_STEP_DELAY = 0.12
 MESSAGE = "Your_l0cal_broker"
@@ -94,7 +89,6 @@ def animate_loading(stop_event, message=MESSAGE, bar_len=ANIM_BAR_LEN, step_dela
         sys.stdout.write("\r" + CLEAR_LINE + " " * (bar_len + 2) + "\n" + CLEAR_LINE + message + "\n")
         sys.stdout.flush()
     except Exception:
-        # ensure stop_event is set on any error to prevent orphaned threads
         stop_event.set()
 
 
@@ -130,7 +124,8 @@ def safe_json(resp):
         return {}
 
 
-# ----------------- Instagram API helper functions (from provided scraper) -----------------
+# ----------------- Instagram API helper functions -----------------
+
 
 def getUserId(username, sessionsId):
     headers = {"User-Agent": "iphone_ua", "x-ig-app-id": "936619743392459"}
@@ -148,7 +143,7 @@ def getUserId(username, sessionsId):
             return {"id": None, "error": "User not found"}
         id = api.json()["data"]['user']['id']
         return {"id": id, "error": None}
-    except ValueError:
+    except Exception:
         return {"id": None, "error": "Rate limit or invalid response"}
 
 
@@ -264,7 +259,7 @@ def do_login_interactive():
     anim_thread = threading.Thread(target=animate_loading, args=(stop_event,), daemon=True)
 
     try:
-        # initial login request with animation
+        # initial login request with animation (30s timeout for initial login)
         stop_event.clear()
         anim_thread.start()
         try:
@@ -280,16 +275,16 @@ def do_login_interactive():
         j = safe_json(r)
 
         # Common checks
-        if 'The password you entered is incorrect' in text or 'bad_password' in text.lower() or (j.get('status') == 'fail' and 'password' in j.get('message', '').lower()):
+        if 'The password you entered is incorrect' in text or 'bad_password' in text.lower() or (isinstance(j, dict) and j.get('status') == 'fail' and 'password' in j.get('message', '').lower()):
             print("\n\n[!] Wrong password.")
             input("[+] Press Enter to exit...")
             return None, None
 
-        # Detect two-factor required (handle truthy strings as well)
+        # Detect two-factor required
         two_factor_required = False
         two_factor_identifier = None
-        # support both boolean and string indicators
-        if j.get("two_factor_required") or j.get("two_factor_info"):
+        # support boolean/string detail in response
+        if isinstance(j, dict) and (j.get("two_factor_required") or j.get("two_factor_info")):
             two_factor_required = True
             info = j.get("two_factor_info") or {}
             two_factor_identifier = info.get("two_factor_identifier") or j.get("two_factor_identifier")
@@ -306,7 +301,7 @@ def do_login_interactive():
             else:
                 print("    (no two_factor_identifier found; we'll still attempt submission)")
 
-            # Prompt for 2FA code with animation and timeout
+            # Prompt for 2FA code with animation and timeout (OTP_TIMEOUT)
             stop_event.clear()
             anim_thread = threading.Thread(target=animate_loading, args=(stop_event,), daemon=True)
             anim_thread.start()
@@ -321,10 +316,11 @@ def do_login_interactive():
                 input("[+] Press Enter to exit...")
                 return None, None
 
-            # Prepare payload. Instagram's two_factor endpoint expects 'verification_code' and two_factor_identifier
+            # Prepare payload. Include both common field names to be robust.
             two_data = {
                 "username": username,
                 "verification_code": code,
+                "verificationCode": code,
                 "device_id": device_id,
                 "phone_id": phone_id,
                 "trust_this_device": "1",
@@ -332,12 +328,12 @@ def do_login_interactive():
             if two_factor_identifier:
                 two_data["two_factor_identifier"] = two_factor_identifier
 
-            # POST two-factor verification (animation while network call runs)
+            # POST two-factor verification (use 60s timeout as requested)
             stop_event.clear()
             anim_thread = threading.Thread(target=animate_loading, args=(stop_event,), daemon=True)
             anim_thread.start()
             try:
-                r2 = s.post(TWO_FACTOR_URL, headers=headers, data=two_data, timeout=30)
+                r2 = s.post(TWO_FACTOR_URL, headers=headers, data=two_data, timeout=OTP_TIMEOUT)
             except Exception as e:
                 stop_event.set()
                 print("\n\n[!] Network error during 2FA request:", e)
@@ -348,13 +344,14 @@ def do_login_interactive():
             j2 = safe_json(r2)
             text2 = r2.text or ""
 
-            # Consider login success if 'logged_in_user' present or status ok and cookies set
+            # Determine success:
             success = False
+            # 1) direct indicator in response
             if 'logged_in_user' in text2:
                 success = True
             elif isinstance(j2, dict) and (j2.get("status") == "ok" and j2.get("logged_in_user")):
                 success = True
-            # Also accept presence of sessionid cookie set in session
+            # 2) session cookie present
             cookie_dict_after = s.cookies.get_dict()
             if not success and any(label_cookie_name(n) == "session" for n in cookie_dict_after.keys()):
                 success = True
@@ -362,7 +359,6 @@ def do_login_interactive():
             if success:
                 print("\n\n[+] Logged In Success (2FA).")
             else:
-                # Helpful debug output for failure
                 if isinstance(j2, dict) and j2.get("status") == "fail":
                     print("\n\n[!] 2FA submission failed:", j2.get("message", text2))
                 else:
@@ -392,7 +388,6 @@ def do_login_interactive():
         else:
             for name, value in cookie_dict.items():
                 label = label_cookie_name(name)
-                # Attempt to get more cookie metadata if available in cookiejar
                 meta = None
                 for c in s.cookies:
                     if c.name == name:
@@ -490,7 +485,6 @@ def prompt_and_scrape(session_cookies):
     print("IGTV posts             : " + str(user.get("total_igtv_videos", 0)))
     bio = user.get("biography", "")
     if bio:
-        # keep formatting on multi-line biography
         print("Biography              : " + (f"""\n{" " * 25}""").join(bio.split("\n")))
     print("Linked WhatsApp        : " + str(user.get("is_whatsapp_linked", False)))
     print("Memorial Account       : " + str(user.get("is_memorialized", False)))
@@ -540,7 +534,6 @@ def prompt_and_scrape(session_cookies):
             else:
                 print("No obfuscated phone found")
         else:
-            # If API returned JSON not in expected dict format, just print a short note
             print("Advanced lookup returned unexpected data (possibly rate-limited or blocked).")
 
     print("-" * 24)
@@ -552,7 +545,6 @@ def main():
     if s is None:
         return
 
-    # Ask whether to scrape using obtained cookies
     prompt_and_scrape(cookies)
 
     input("\n[+] Done. Press Enter to exit...")
