@@ -6,9 +6,9 @@ import os
 import time
 import threading 
 import sys 
-import json # Added to handle JSON parsing more reliably
+import json 
 
-# The original 'colorPrint' function is replaced with standard 'print' for plain text
+# Replaced colorPrint with standard print
 def simplePrint(*args):
     """Prints output using standard print, replacing the old colorPrint."""
     print(''.join(str(arg) for arg in args))
@@ -26,33 +26,31 @@ def get_time_str():
 def animated_loading_bar(duration_seconds=15, message="Your_l0cal_broker"):
     """Displays a simple animated loading bar in a separate thread."""
     global _stop_animation
-    
+
     bar_length = 30
     steps = 100
     interval = max(0.01, duration_seconds / steps) 
 
-    # Removed color code from print_style
     print_style = "\r" 
-    
+
     for i in range(steps + 1):
         if _stop_animation:
             sys.stdout.write("\r" + " " * (bar_length + 20) + "\r")
             sys.stdout.flush()
             break
-            
+
         progress = i / steps
         filled_length = int(bar_length * progress)
         bar = '█' * filled_length + '-' * (bar_length - filled_length)
-        
-        # Removed color codes from the format string
+
         sys.stdout.write(f"{print_style}[{bar}] {int(progress * 100)}% {message}")
         sys.stdout.flush()
         time.sleep(interval)
-    
+
     if not _stop_animation:
         sys.stdout.write("\r" + " " * (bar_length + 20) + "\r")
         sys.stdout.flush()
-    
+
 
 def fetch_data(username):
     """Initiates the fetching of profile information and posts."""
@@ -63,9 +61,9 @@ def fetch_data(username):
         "[INFO] \t\t", 
         "Fetching profile info and posts..."
     )
-    
+
     response = None
-    
+
     _stop_animation = False
     loading_thread = threading.Thread(
         target=animated_loading_bar, 
@@ -73,7 +71,7 @@ def fetch_data(username):
         daemon=True 
     ) 
     loading_thread.start()
-    
+
     try:
         url = f"https://www.instagram.com/api/v1/users/web_profile_info/?username={username}"
         headers = {
@@ -81,7 +79,7 @@ def fetch_data(username):
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
         }
         response = requests.get(url, headers=headers, timeout=15)
-        
+
         _stop_animation = True
         loading_thread.join(timeout=1) 
 
@@ -100,10 +98,10 @@ def fetch_data(username):
 
         account_type(user_data)
         posts_found = get_posts(user_data)
-        
+
         if posts_found:
             ask_to_download()
-        
+
     except RequestException as e:
         _stop_animation = True
         loading_thread.join(timeout=1)
@@ -127,7 +125,7 @@ def error_handler(response):
     """Handles and prints API response errors."""
     current_time = get_time_str()
     status_code = response.status_code
-    
+
     if status_code == 404:
         msg = "User not found"
     elif status_code == 401:
@@ -141,7 +139,7 @@ def error_handler(response):
             msg = f"{data['message']} ({msg})"
     except json.JSONDecodeError:
         pass 
-    
+
     simplePrint(
         f"[{current_time}] \t",
         f"[{status_code}] [ERROR] \t",
@@ -154,7 +152,7 @@ def account_type(user_data):
     current_time = get_time_str()
     is_private = user_data.get("is_private")
     type_msg = "Private profile" if is_private else "Public profile"
-    
+
     simplePrint(
         f"[{current_time}] \t",
         "[TYPE]  \t\t",
@@ -182,12 +180,11 @@ def get_posts(user_data):
             post_owner = user_data["username"]
 
             post_url = f"https://www.instagram.com/p/{post_shortcode}/"
-            
-            # Simplified separator line
+
             print(f"+--------------------------------------------------------[{i}]-------------------------------------------------------+\n", end='')
 
             media_type_msg = "[VIDEO]" if is_video_flag else "[IMAGE]"
-            
+
             simplePrint(
                 f"[{current_time}] \t",
                 f"{media_type_msg} \t\t",
@@ -208,7 +205,7 @@ def get_posts(user_data):
                     "[COLLAB] \t",
                     f"https://www.instagram.com/{collaborator_username}"
                 )
-            
+
             print()
         return True
 
@@ -218,7 +215,7 @@ def ask_to_download():
     download_choice = input(
         f"[{get_time_str()}] \t [PROMPT] \t Would you like to download any of the posts listed? (y/n): "
     ).lower().strip()
-    
+
     if download_choice in ('y', 'yes'):
         post_url = input(
             f"[{get_time_str()}] \t [PROMPT] \t Enter the full post URL to download: "
@@ -234,12 +231,12 @@ def ask_to_download():
 def fetch_media_details(url):
     """Extracts the direct media URL and filename from a post URL."""
     global _is_video, _media_url, _file_name
-    
+
     _is_video, _media_url, _file_name = None, None, None
 
     url = url.strip().strip('/')
     parts = url.split("/")
-    
+
     if len(parts) < 6 or parts[2] != "www.instagram.com":
         simplePrint(
             f"[{get_time_str()}] \t",
@@ -247,7 +244,7 @@ def fetch_media_details(url):
             "Invalid URL format. Check if the URL is complete."
         )
         return False
-    
+
     try:
         user_name = parts[3]
         media_type = parts[4] 
@@ -259,9 +256,9 @@ def fetch_media_details(url):
             "Incomplete URL detected."
         )
         return False
-    
+
     is_reel = media_type == 'reel'
-    
+
     base_name = f"{user_name}-{media_type}-{shortcode[:10].replace('-', '')}"
     _file_name = f"{base_name}{'.mp4' if is_reel else '.jpg'}" 
 
@@ -270,7 +267,7 @@ def fetch_media_details(url):
         "[INFO] \t\t", 
         "Fetching media link..."
     )
-    
+
     response = None
     try:
         r = requests.get(
@@ -291,15 +288,15 @@ def fetch_media_details(url):
             if node.get("shortcode") == shortcode:
                 _is_video = node.get("is_video", False)
                 _media_url = node.get("video_url") or node.get("display_url")
-                
+
                 if _is_video and not _file_name.endswith('.mp4'):
                     _file_name = _file_name.rsplit('.', 1)[0] + '.mp4'
                 elif not _is_video and not _file_name.endswith('.jpg'):
                     _file_name = _file_name.rsplit('.', 1)[0] + '.jpg'
-                
+
                 found = True
                 break
-        
+
         if not found:
             simplePrint(
                 f"[{get_time_str()}] \t",
@@ -330,7 +327,7 @@ def fetch_media_details(url):
 def download_media(post_url):
     """Downloads the media file to the 'InstaDownloads' directory."""
     global _is_video, _media_url, _file_name
-    
+
     if not fetch_media_details(post_url):
         return
 
@@ -351,7 +348,7 @@ def download_media(post_url):
         "[INFO] \t\t",
         "Starting download..."
     )
-    
+
     try:
         r = requests.get(
             _media_url, 
@@ -364,7 +361,7 @@ def download_media(post_url):
             file_path = os.path.join(download_dir, _file_name)
             total_size = int(r.headers.get('content-length', 0))
             downloaded_size = 0
-            
+
             simplePrint(
                 f"[{get_time_str()}] \t",
                 "[INFO] \t\t",
@@ -375,15 +372,15 @@ def download_media(post_url):
                 for chunk in r.iter_content(chunk_size=8192):
                     f.write(chunk)
                     downloaded_size += len(chunk)
-                    
+
                     if total_size > 0 and downloaded_size % (8192 * 50) == 0:
                         percent = (downloaded_size / total_size) * 100
                         sys.stdout.write(f"\r[{get_time_str()}] \t [PROGRESS] \t {percent:.2f}% downloaded...")
                         sys.stdout.flush()
-            
+
             sys.stdout.write("\r" + " " * 80 + "\r")
             sys.stdout.flush()
-            
+
             simplePrint(
                 f"[{get_time_str()}] \t",
                 "[SUCCESS] \t",
