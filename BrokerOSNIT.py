@@ -2,9 +2,15 @@
 """
 BrokerOSNIT.py
 
+Changes:
+- When performing the "advanced lookup" and the user/info retrieval, the script now prints
+  the full raw JSON returned by the API (pretty-printed) so you can see the maximum available
+  data. Server-side obfuscation (e.g. masked emails/phones) cannot be bypassed by this script;
+  however this will expose any un-obfuscated fields returned by the API.
+- All other behavior (login, 2FA prompt, animation, scraping flow) is preserved.
+
 Usage:
-cd BrokerOSNIT
-Python3 ./BrokerOSNIT.py
+    python3 BrokerOSNIT.py
 
 Dependencies:
     pip install requests stdiomask
@@ -17,6 +23,7 @@ import re
 import time
 import queue
 import threading
+import json
 
 import requests
 import stdiomask
@@ -142,9 +149,9 @@ def getUserId(username, sessionsId):
         if api.status_code == 404:
             return {"id": None, "error": "User not found"}
         id = api.json()["data"]['user']['id']
-        return {"id": id, "error": None}
+        return {"id": id, "error": None, "raw": api.json()}
     except Exception:
-        return {"id": None, "error": "Rate limit or invalid response"}
+        return {"id": None, "error": "Rate limit or invalid response", "raw_text": api.text if 'api' in locals() else ""}
 
 
 def getInfo(search, sessionId, searchType="username"):
@@ -167,18 +174,18 @@ def getInfo(search, sessionId, searchType="username"):
             timeout=20
         )
         if response.status_code == 429:
-            return {"user": None, "error": "Rate limit"}
+            return {"user": None, "error": "Rate limit", "raw": safe_json(response)}
 
         response.raise_for_status()
         info_user = response.json().get("user")
         if not info_user:
-            return {"user": None, "error": "Not found"}
+            return {"user": None, "error": "Not found", "raw": safe_json(response)}
 
         info_user["userID"] = userId
-        return {"user": info_user, "error": None}
+        return {"user": info_user, "error": None, "raw": safe_json(response)}
 
-    except requests.exceptions.RequestException:
-        return {"user": None, "error": "Not found"}
+    except requests.exceptions.RequestException as e:
+        return {"user": None, "error": f"Network error: {e}"}
 
 
 from urllib.parse import quote_plus
@@ -187,7 +194,8 @@ from json import dumps, decoder
 
 def advanced_lookup(username):
     """
-    Post to get obfuscated login infos
+    Post to get obfuscated login infos. Return raw JSON (if any) in the result so caller can
+    inspect everything the API returned.
     """
     data = "signed_body=SIGNATURE." + quote_plus(dumps(
         {"q": username, "skip_recovery": "1"},
@@ -209,13 +217,26 @@ def advanced_lookup(username):
             data=data,
             timeout=20
         )
-    except requests.RequestException:
-        return ({"user": None, "error": "network"})
+    except requests.RequestException as e:
+        return {"user": None, "error": f"network: {e}"}
 
     try:
-        return ({"user": api.json(), "error": None})
+        parsed = api.json()
+        return {"user": parsed, "error": None, "raw": parsed}
     except decoder.JSONDecodeError:
-        return ({"user": None, "error": "rate limit"})
+        return {"user": None, "error": "rate limit or invalid json", "raw_text": api.text}
+
+
+# ----------------- Utility pretty print -----------------
+
+
+def pretty_print_json(obj, label=None):
+    if label:
+        print(f"\n--- {label} ---")
+    try:
+        print(json.dumps(obj, indent=2, ensure_ascii=False))
+    except Exception:
+        print(str(obj))
 
 
 # ----------------- Main flow -----------------
@@ -275,7 +296,8 @@ def do_login_interactive():
         j = safe_json(r)
 
         # Common checks
-        if 'The password you entered is incorrect' in text or 'bad_password' in text.lower() or (isinstance(j, dict) and j.get('status') == 'fail' and 'password' in j.get('message', '').lower()):
+        if 'The password you entered is incorrect' in text or 'bad_password' in text.lower() or \
+           (isinstance(j, dict) and j.get('status') == 'fail' and 'password' in j.get('message', '').lower()):
             print("\n\n[!] Wrong password.")
             input("[+] Press Enter to exit...")
             return None, None
@@ -359,12 +381,12 @@ def do_login_interactive():
             if success:
                 print("\n\n[+] Logged In Success (2FA).")
             else:
-                if isinstance(j2, dict) and j2.get("status") == "fail":
-                    print("\n\n[!] 2FA submission failed:", j2.get("message", text2))
-                else:
-                    print("\n\n[!] 2FA response did not indicate success. Response (truncated):")
-                    displayed = text2[:1500] + ("..." if len(text2) > 1500 else "")
-                    print(displayed)
+                # Provide the full 2FA response JSON to help diagnose / show maximum info
+                print("\n\n[!] 2FA response did not indicate success. Full response below:")
+                pretty_print_json(j2, label="2FA response JSON")
+                displayed = text2[:1500] + ("..." if len(text2) > 1500 else "")
+                print("\n(truncated raw text):")
+                print(displayed)
                 input("[+] Press Enter to exit...")
                 return None, None
 
@@ -373,9 +395,11 @@ def do_login_interactive():
             if 'logged_in_user' in text or (isinstance(j, dict) and j.get("status") == "ok" and j.get("logged_in_user")):
                 print("\n\n[+] Logged In Success.")
             else:
-                # unknown response
-                print("\n\n[!] Login response (truncated):")
+                # unknown response - show full JSON to reveal maximum info
+                print("\n\n[!] Login response did not clearly indicate success. Full response JSON below:")
+                pretty_print_json(j, label="Login response JSON")
                 displayed = text[:1500] + ("..." if len(text) > 1500 else "")
+                print("\n(truncated raw text):")
                 print(displayed)
                 input("[+] Press Enter to exit...")
                 return None, None
@@ -416,7 +440,8 @@ def prompt_and_scrape(session_cookies):
     Ask the user if they'd like to scrape an account. If yes, prompt for target (username or id)
     and run getInfo/advanced_lookup using the sessionid from session_cookies.
 
-    Shows the broker animation while performing the network calls for scraping.
+    Shows the broker animation while performing the network calls for scraping and prints
+    the full raw JSON returned by each API call so you can inspect maximum data.
     """
     yn = input("\n[?] Do you want to scrape an account using the session id? (y/N): ").strip().lower()
     if yn != "y":
@@ -466,47 +491,39 @@ def prompt_and_scrape(session_cookies):
 
     if result.get("error"):
         print(f"[!] Error: {result['error']}")
+        # show raw response if present
+        if "raw" in result:
+            pretty_print_json(result["raw"], label="Raw getInfo response")
+        if "raw_text" in result:
+            print("\nRaw text:")
+            print(result["raw_text"][:2000])
         return
     user = result.get("user")
     if not user:
         print("[!] No user data returned.")
+        if "raw" in result:
+            pretty_print_json(result["raw"], label="Raw getInfo response")
         return
 
-    # Pretty-print results similar to the provided script
-    print("\nInformations about     : " + user.get("username", ""))
-    print("userID                 : " + str(user.get("userID", "")))
-    print("Full Name              : " + user.get("full_name", ""))
-    print("Verified               : " + str(user.get('is_verified', False)) + " | Is business Account : " + str(user.get("is_business", False)))
-    print("Is private Account     : " + str(user.get("is_private", False)))
-    print("Follower               : " + str(user.get("follower_count", 0)) + " | Following : " + str(user.get("following_count", 0)))
-    print("Number of posts        : " + str(user.get("media_count", 0)))
-    if user.get("external_url"):
-        print("External url           : " + user.get("external_url"))
-    print("IGTV posts             : " + str(user.get("total_igtv_videos", 0)))
-    bio = user.get("biography", "")
-    if bio:
-        print("Biography              : " + (f"""\n{" " * 25}""").join(bio.split("\n")))
-    print("Linked WhatsApp        : " + str(user.get("is_whatsapp_linked", False)))
-    print("Memorial Account       : " + str(user.get("is_memorialized", False)))
-    print("New Instagram user     : " + str(user.get("is_new_to_instagram", False)))
+    # Pretty-print the full user JSON (maximum info)
+    pretty_print_json(user, label="User JSON (full)")
 
-    if "public_email" in user.keys() and user["public_email"]:
-        print("Public Email           : " + user["public_email"])
-
-    if "public_phone_number" in user.keys() and str(user["public_phone_number"]):
-        phonenr = "+" + str(user.get("public_phone_country_code", "")) + " " + str(user.get("public_phone_number", ""))
-        if HAS_PHONE:
+    # Print some common fields as earlier but also list every key/value under the user dict
+    print("\n-- Key summary (from returned user JSON) --")
+    for k in sorted(user.keys()):
+        v = user.get(k)
+        # For nested structures, show compact JSON
+        if isinstance(v, (dict, list)):
             try:
-                pn = phonenumbers.parse(phonenr)
-                countrycode = region_code_for_country_code(pn.country_code)
-                country = pycountry.countries.get(alpha_2=countrycode)
-                phonenr = phonenr + " ({}) ".format(country.name)
+                compact = json.dumps(v, ensure_ascii=False)
             except Exception:
-                pass
-        print("Public Phone number    : " + phonenr)
+                compact = str(v)
+            print(f"{k}: {compact}")
+        else:
+            print(f"{k}: {v}")
 
     # advanced lookup with animation
-    print("\n[*] Performing advanced lookup (may reveal obfuscated email/phone)...")
+    print("\n[*] Performing advanced lookup (raw response will be shown)...")
     stop_event = threading.Event()
     anim_thread = threading.Thread(target=animate_loading, args=(stop_event,), daemon=True)
     stop_event.clear()
@@ -517,24 +534,30 @@ def prompt_and_scrape(session_cookies):
     stop_event.set()
     anim_thread.join(timeout=0.5)
 
-    if other_infos.get("error") == "rate limit":
-        print("Rate limit: please wait a few minutes before you try again")
-    elif other_infos.get("user") and isinstance(other_infos["user"], dict) and "message" in other_infos["user"].keys():
-        msg = other_infos["user"]["message"]
-        print("Lookup message         : " + str(msg))
-    else:
-        obf = other_infos.get("user", {})
-        if isinstance(obf, dict):
-            if obf.get("obfuscated_email"):
-                print("Obfuscated email       : " + str(obf.get("obfuscated_email")))
-            else:
-                print("No obfuscated email found")
-            if obf.get("obfuscated_phone"):
-                print("Obfuscated phone       : " + str(obf.get("obfuscated_phone")))
-            else:
-                print("No obfuscated phone found")
-        else:
-            print("Advanced lookup returned unexpected data (possibly rate-limited or blocked).")
+    # Print full advanced lookup raw JSON (or raw text) to reveal as much as possible
+    if other_infos.get("error"):
+        print(f"[!] advanced_lookup error: {other_infos['error']}")
+        if "raw_text" in other_infos:
+            print("\nRaw advanced_lookup text (truncated):")
+            print(other_infos["raw_text"][:2000])
+        return
+
+    # Show the entire payload returned by the lookup endpoint
+    pretty_print_json(other_infos.get("raw"), label="Advanced lookup (full raw JSON)")
+
+    # If the response contains obfuscated fields, show them explicitly (raw)
+    if isinstance(other_infos.get("raw"), dict):
+        obf_email = None
+        obf_phone = None
+        # Attempt common paths where obfuscated info appears
+        # We print anything that looks like 'obfuscated' in keys
+        found = False
+        for key, val in other_infos["raw"].items():
+            if "obfus" in str(key).lower() or "email" in str(key).lower() or "phone" in str(key).lower():
+                found = True
+                print(f"{key}: {val}")
+        if not found:
+            print("(No explicit obfuscated fields detected at top-level of lookup response.)")
 
     print("-" * 24)
     print("Profile Picture        : " + str(user.get("hd_profile_pic_url_info", {}).get("url", "")))
